@@ -2,13 +2,33 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>TryOnAI - Upload Images</title>
+    <title>Virtual Try-On</title>
+    <style>
+        .clothing-item {
+            display: inline-block;
+            margin: 10px;
+            text-align: center;
+        }
+        .clothing-item img {
+            max-width: 100px;
+            max-height: 100px;
+        }
+    </style>
 </head>
 <body>
-    <h1>Upload Clothing Images</h1>
-    <form action="/" method="post" enctype="multipart/form-data">
-        <input type="file" name="images" multiple>
-        <input type="submit" value="Upload">
+    <h1>Upload Clothing Item</h1>
+    <form id="upload-form" enctype="multipart/form-data">
+        <input type="file" name="image" accept="image/*" required>
+        <button type="submit">Upload</button>
     </form>
+    <div id="clothing-options"></div>
+    <button id="start-camera" disabled>Start Camera</button>
+    <div id="video-container" style="position: relative; display: none;">
+        <video id="video" autoplay playsinline width="640" height="480"></video>
+        <canvas id="canvas" style="position: absolute; top: 0; left: 0;"></canvas>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js"></script>
+    <script src="/static/js/main.js"></script>
 </body>
 </html>

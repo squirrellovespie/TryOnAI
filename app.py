@@ -1,86 +1,134 @@
-import os
+from flask import Flask, request, jsonify, render_template
 import cv2
 import numpy as np
-from flask import Flask, render_template, request, redirect, url_for
-from tensorflow.keras import layers, models
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import os
+import pandas as pd
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
-app.config['MODEL_FOLDER'] = 'static/models'
 
-# Ensure upload and model directories exist
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-os.makedirs(app.config['MODEL_FOLDER'], exist_ok=True)
+# Define the pix2pix upsample function
+def upsample(filters, size, apply_dropout=False):
+    initializer = tf.random_normal_initializer(0., 0.02)
+    result = keras.Sequential()
+    result.add(layers.Conv2DTranspose(filters, size, strides=2,
+                                      padding='same',
+                                      kernel_initializer=initializer,
+                                      use_bias=False))
+    result.add(layers.BatchNormalization())
+    if apply_dropout:
+        result.add(layers.Dropout(0.5))
+    result.add(layers.ReLU())
+    return result
 
-# Define the U-Net model architecture (must match the trained model)
-def unet_model(input_size=(128, 128, 3)):
-    inputs = layers.Input(input_size)
-    c1 = layers.Conv2D(64, 3, activation='relu', padding='same')(inputs)
-    c1 = layers.Conv2D(64, 3, activation='relu', padding='same')(c1)
-    p1 = layers.MaxPooling2D((2, 2))(c1)
-    c2 = layers.Conv2D(128, 3, activation='relu', padding='same')(p1)
-    c2 = layers.Conv2D(128, 3, activation='relu', padding='same')(c2)
-    p2 = layers.MaxPooling2D((2, 2))(c2)
-    c3 = layers.Conv2D(256, 3, activation='relu', padding='same')(p2)
-    c3 = layers.Conv2D(256, 3, activation='relu', padding='same')(c3)
-    u4 = layers.UpSampling2D((2, 2))(c3)
-    u4 = layers.concatenate([u4, c2])
-    c4 = layers.Conv2D(128, 3, activation='relu', padding='same')(u4)
-    c4 = layers.Conv2D(128, 3, activation='relu', padding='same')(c4)
-    u5 = layers.UpSampling2D((2, 2))(c4)
-    u5 = layers.concatenate([u5, c1])
-    c5 = layers.Conv2D(64, 3, activation='relu', padding='same')(u5)
-    c5 = layers.Conv2D(64, 3, activation='relu', padding='same')(c5)
-    outputs = layers.Conv2D(1, 1, activation='sigmoid')(c5)
-    return models.Model(inputs, outputs)
+# Define the MobileNetV2-based U-Net model
+def unet_model(input_size=(256, 256, 3), num_classes=59):
+    base_model = keras.applications.MobileNetV2(
+        include_top=False,
+        weights="imagenet",
+        input_shape=input_size,
+        classes=num_classes,
+        name="base_encoder_model"
+    )
+    base_model_layer_names = [
+        'block_1_expand_relu',
+        'block_3_expand_relu',
+        'block_6_expand_relu',
+        'block_13_expand_relu',
+        'block_16_project',
+    ]
+    base_model_outputs = [base_model.get_layer(name).output for name in base_model_layer_names]
+    encoder_model = keras.Model(inputs=base_model.input, outputs=base_model_outputs)
+    encoder_model.trainable = False
 
-# Load the pre-trained U-Net model
-model = unet_model()
-model.load_weights('models/unet_clothing_segmentation.h5')
+    inputs = layers.Input(shape=input_size)
+    enc_layers = encoder_model(inputs)
 
-# Function to segment clothing from an image
-def segment_clothing(image_path):
-    img = cv2.imread(image_path)
-    img_resized = cv2.resize(img, (128, 128)) / 255.0
-    img_input = np.expand_dims(img_resized, axis=0)
-    mask_pred = model.predict(img_input)
-    mask_binary = (mask_pred > 0.5).astype(np.uint8)
-    img_original_resized = cv2.resize(img, (128, 128))
-    segmented_clothing = cv2.bitwise_and(img_original_resized, img_original_resized, mask=mask_binary[0, :, :, 0])
-    segmented_path = os.path.join(app.config['UPLOAD_FOLDER'], 'segmented_' + os.path.basename(image_path))
-    cv2.imwrite(segmented_path, segmented_clothing)
-    return segmented_path
+    x = upsample(512, 3, apply_dropout=True)(enc_layers[-1])
+    x = layers.Concatenate()([x, enc_layers[-2]])
+    x = upsample(256, 3, apply_dropout=True)(x)
+    x = layers.Concatenate()([x, enc_layers[-3]])
+    x = upsample(128, 3)(x)
+    x = layers.Concatenate()([x, enc_layers[-4]])
+    x = upsample(64, 3)(x)
+    x = layers.Concatenate()([x, enc_layers[-5]])
+    outputs = layers.Conv2DTranspose(num_classes, (3, 3), strides=2, padding="same", activation="softmax")(x)
 
-# Placeholder function to generate a 3D model
-def generate_3d_model(segmented_images):
-    # This is a placeholder; replace with actual 3D reconstruction logic (e.g., PIFuHD)
-    # For now, it creates a dummy .obj file
-    model_path = os.path.join(app.config['MODEL_FOLDER'], 'clothing_model.obj')
-    with open(model_path, 'w') as f:
-        f.write("# Dummy OBJ file\nv 0.0 0.0 0.0\nv 1.0 0.0 0.0\nv 0.0 1.0 0.0\nf 1 2 3")
-    return model_path
+    return keras.Model(inputs=inputs, outputs=outputs)
 
-# Flask routes
-@app.route('/', methods=['GET', 'POST'])
+# Load the trained model
+model = unet_model(input_size=(256, 256, 3), num_classes=59)
+model.load_weights('static/models/model_cloths.h5')
+
+# Load class labels
+class_names = pd.read_csv('static/labels.csv')
+class_dict = dict(class_names.values)
+
+@app.route('/')
 def index():
-    if request.method == 'POST':
-        files = request.files.getlist('images')
-        segmented_images = []
-        for file in files:
-            if file and file.filename:
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-                file.save(file_path)
-                segmented_path = segment_clothing(file_path)
-                segmented_images.append(segmented_path)
-        # Generate 3D model from segmented images
-        model_path = generate_3d_model(segmented_images)
-        return redirect(url_for('result', model_path=os.path.basename(model_path)))
     return render_template('index.html')
 
-@app.route('/result')
-def result():
-    model_path = request.args.get('model_path')
-    return render_template('result.html', model_path=model_path)
+@app.route('/upload', methods=['POST'])
+def upload():
+    if 'image' not in request.files:
+        return jsonify({'success': False, 'message': 'No image uploaded'})
+    file = request.files['image']
+    if file.filename == '':
+        return jsonify({'success': False, 'message': 'No image selected'})
+    
+    image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'clothing.jpg')
+    file.save(image_path)
+    
+    img = cv2.imread(image_path)
+    if img is None:
+        return jsonify({'success': False, 'message': 'Failed to load image'})
+    original_shape = img.shape[:2]
+    img_resized = cv2.resize(img, (256, 256)).astype(np.float32) / 255.0
+    img_input = np.expand_dims(img_resized, axis=0)
+    
+    mask_pred = model.predict(img_input)[0]  # [256, 256, 59]
+    mask = np.argmax(mask_pred, axis=-1).astype(np.uint8)  # [256, 256]
+    mask = cv2.resize(mask, (original_shape[1], original_shape[0]), interpolation=cv2.INTER_NEAREST)
+    
+    # Save full mask for debugging
+    cv2.imwrite(os.path.join(app.config['UPLOAD_FOLDER'], 'predicted_mask.png'), mask * 4)
+    
+    # Detect all unique classes (excluding background, class 0)
+    unique_classes = np.unique(mask)
+    clothing_items = []
+    
+    for class_idx in unique_classes:
+        if class_idx == 0:  # Skip background
+            continue
+        if class_idx not in class_dict:
+            continue  # Skip if class not in labels.csv
+        
+        # Create mask for this class
+        item_mask = (mask == class_idx).astype(np.uint8) * 255
+        alpha = item_mask
+        b, g, r = cv2.split(img)
+        rgba = [b, g, r, alpha]
+        dst = cv2.merge(rgba, 4)
+        
+        # Save the segmented item
+        item_filename = f'segmented_item_{class_idx}.png'
+        item_path = os.path.join(app.config['UPLOAD_FOLDER'], item_filename)
+        cv2.imwrite(item_path, dst)
+        
+        # Add to response
+        clothing_items.append({
+            'label': class_dict[class_idx],
+            'url': f'/static/uploads/{item_filename}'
+        })
+    
+    if not clothing_items:
+        return jsonify({'success': False, 'message': 'No clothing items detected'})
+    
+    return jsonify({'success': True, 'clothing_items': clothing_items})
 
 if __name__ == '__main__':
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     app.run(debug=True)
